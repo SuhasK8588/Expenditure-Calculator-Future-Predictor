@@ -1,0 +1,235 @@
+import sqlite3
+import datetime
+import pandas as pd
+import numpy as np
+import streamlit as st
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
+class ExpenditureCalculator:
+    def __init__(self, username):
+        # FIX: SQLite files should end in .db or .sqlite, not .csv
+        self.db_name = f"{username}_spent.db"
+        self.conn = sqlite3.connect(self.db_name, check_same_thread=False)
+        self.create_table()
+  
+    def create_table(self):
+        # FIX: Corrected typo 'EXISTES' to 'EXISTS'
+        query = '''
+        CREATE TABLE IF NOT EXISTS expenditures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            Amount REAL,
+            Reason TEXT,
+            Date TEXT,
+            Type TEXT
+        )'''
+        self.conn.execute(query)
+        self.conn.commit()
+
+    def load_data(self):
+        query = "SELECT * FROM expenditures"
+        return pd.read_sql_query(query, self.conn)
+
+    def income(self, amount, reason, date):
+        if amount:
+            query = "INSERT INTO expenditures(Amount, Reason, Date, Type) VALUES(?, ?, ?, ?)"
+            self.conn.execute(query, (amount, reason.strip(), str(date), "Income"))
+            self.conn.commit()
+            st.success("Your income activity has been saved!")
+        else:
+            st.error("Please enter a valid amount.")
+
+    def spent(self, amount, reason, date):
+        if amount:
+            query = "INSERT INTO expenditures(Amount, Reason, Date, Type) VALUES(?, ?, ?, ?)"
+            self.conn.execute(query, (amount, reason.strip(), str(date), "Spent"))
+            self.conn.commit()
+            st.success("Your expense activity has been saved!")
+        else:
+            st.error("Please enter a valid amount.")
+
+    def style_rows(self, row):
+        color = 'color: green' if row['Type'] == 'Income' else 'color: red'
+        return [color] * len(row)
+
+    def display(self):
+        df = self.load_data()
+        if not df.empty:
+            st.header("Your Activities")
+            st.dataframe(df.drop(columns=['id']).style.apply(self.style_rows, axis=1), use_container_width=True)
+            
+            chart_df = df.copy()
+            chart_df['Date'] = pd.to_datetime(chart_df['Date'])
+            chart_df['Adjusted_Amount'] = chart_df.apply(lambda x: x['Amount'] if x['Type'] == 'Income' else -x['Amount'], axis=1)
+            net_balance = chart_df.groupby("Date")["Adjusted_Amount"].sum()
+            st.bar_chart(net_balance)
+        else:
+            st.info("No activities found.")
+
+    def delete(self, index):
+        df = self.load_data()
+        ne_in = index - 1
+        if df.empty:
+            st.error("No activities found")
+        elif ne_in < 0 or ne_in >= len(df):
+            st.error("Out of range, please check the index number.")
+        else:
+            actual_id = int(df.iloc[ne_in]['id']) 
+            query = "DELETE FROM expenditures WHERE id=?" 
+            self.conn.execute(query, (actual_id,))
+            self.conn.commit()
+            st.success("Your data was updated successfully!")
+            return True
+        return False
+          
+    def changedate(self, amount, reason, date):
+        query = "UPDATE expenditures SET Date=? WHERE Reason=? AND Amount=?"
+        self.conn.execute(query, (str(date), reason.lower().strip(), amount))
+        self.conn.commit()
+        st.success("Update completed successfully!")
+       
+    def changeamount(self, reason, date, amount):
+        query = "UPDATE expenditures SET Amount=? WHERE Reason=? AND Date=?"
+        self.conn.execute(query, (amount, reason.lower().strip(), str(date)))
+        self.conn.commit()
+        st.success("Update completed successfully!")
+
+    def changereason(self, amount, date, reason):
+        query = "UPDATE expenditures SET Reason=? WHERE Amount=? AND Date=?"
+        self.conn.execute(query, (reason.lower().strip(), amount, str(date)))
+        self.conn.commit()
+        st.success("Update completed successfully!")
+
+    def predict_transaction(self, date):
+      
+        df = self.load_data()
+        if len(df) < 5:
+            return "Not enough data to make a prediction yet! Please log at least 5 activities."
+        
+        df_ml = df.copy()
+        df_ml['Date_Ordinal'] = pd.to_datetime(df_ml['Date']).apply(lambda x: x.toordinal())
+        
+        X = df_ml[['Date_Ordinal']]
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        Y_type = df_ml["Type"]
+        Y_amount = df_ml["Amount"]
+        
+        # Classification Model (Income vs Spent)
+        model_type = RandomForestClassifier(n_estimators=100, random_state=42)
+        model_type.fit(X_scaled, Y_type)
+        
+        
+        model_amount = RandomForestRegressor(n_estimators=100, random_state=42)
+        model_amount.fit(X_scaled, Y_amount)
+         
+         
+        target_ordinal = pd.to_datetime(date).toordinal()
+        target_scaled = scaler.transform(pd.DataFrame([[target_ordinal]], columns=['Date_Ordinal']))
+        
+        pred_type = model_type.predict(target_scaled)[0]
+        pred_amount = model_amount.predict(target_scaled)[0]
+        
+        return f"Predicted transaction trend on {date}: **{pred_type}** of around **${pred_amount:.2f}**"
+
+# --- STREAMLIT UI RUNNER ---
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+def logged_in():
+    st.title("Create Account / Login")
+    with st.form("login_form"):
+        username = st.text_input("Enter your username")
+        password = st.text_input("Enter your password", type="password")
+        submit = st.form_submit_button("Login")
+        if submit:
+            if username and password:
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error("Please enter a valid username and password")
+
+def main_app():
+    app = ExpenditureCalculator(st.session_state.username)
+    
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.session_state.username = None
+        st.rerun()
+   
+    st.title("Expenditure Calculator & Predictor")
+    st.write(f"Welcome back, **{st.session_state.username}**")
+    
+    # Clean UI Navigation
+    menu = ["Add Activities", "Insights & Predictions", "Update/Delete Entries"]
+    choice = st.sidebar.selectbox("Workspace Navigation", menu)
+    
+    if choice == "Add Activities":
+        st.subheader("Add New Record")
+        typ = st.radio("Is this activity an income or an expense?", ["Income", "Spent"])
+        amount = st.number_input('Enter the amount', min_value=1.0, format="%.2f")
+        reason = st.text_input("Enter the description/reason").lower()
+        date = st.date_input("Enter transaction date")
+        
+        if st.button("Add to List"):
+            if typ == "Income":
+                app.income(amount, reason, date)
+            else:
+                app.spent(amount, reason, date)
+                
+    elif choice == "Insights & Predictions":
+        app.display()
+        
+        st.divider()
+        st.subheader("🤖 Future Trend Predictor")
+        # FIX: Kept target date outside of the execution button conditional block
+        target_date = st.date_input("Select a future date to predict transaction activity", value=datetime.date.today())
+        if st.button("Generate ML Prediction"):
+            prediction_result = app.predict_transaction(target_date)
+            st.info(prediction_result)
+
+    elif choice == "Update/Delete Entries":
+        app.display()
+        st.divider()
+        
+        action = st.radio("Choose database management task:", ["Delete An Entry", "Modify Data Fields"])
+        
+        if action == "Delete An Entry":
+            ent = st.number_input("Which row index number do you need to delete?", min_value=1, step=1)
+            if st.button("Execute Delete Row", type="primary"):
+                if app.delete(ent):
+                    st.rerun()
+                    
+        elif action == "Modify Data Fields":
+            sus = st.radio("What fields would you like to update?", ["Change Amount", "Change Reason", "Change Date"])
+            
+            if sus == "Change Amount":
+                reason = st.text_input("Match existing reason:")
+                date = st.date_input("Match existing date")
+                amount = st.number_input("New numerical amount:", min_value=1)
+                if st.button("Update Target Amount"):
+                    app.changeamount(reason, date, amount)
+                    st.rerun()
+                    
+            elif sus == "Change Reason":
+                date = st.date_input("Match existing date")
+                amount = st.number_input("Match existing amount", min_value=1)
+                reason = st.text_input("New description text:")
+                if st.button("Update Target Reason"):
+                    app.changereason(amount, date, reason)
+                    st.rerun()
+                    
+            elif sus == "Change Date":
+                amount = st.number_input("Match existing amount", min_value=1)
+                reason = st.text_input("Match existing reason:")
+                date = st.date_input("New target date:")
+                if st.button("Update Target Date"):
+                    app.changedate(amount, reason, date)
+                    st.rerun()
+
+if st.session_state.logged_in:
+    main_app()
+else:
+    logged_in()
